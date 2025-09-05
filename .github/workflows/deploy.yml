@@ -95,8 +95,8 @@ jobs:
             aws ssm send-command \
               --document-name "AWS-RunShellScript" \
               --instance-ids "$IID" \
-              --parameters commands="sed -i \"s|^Environment=IMAGE_URI=.*|Environment=IMAGE_URI=${IMAGE_TO_DEPLOY}|\" /etc/systemd/system/${APP_NAME}.service && systemctl daemon-reload && systemctl restart ${APP_NAME}.service" \
-              --comment "Deploy ${IMAGE_TO_DEPLOY}" >/dev/null
+              --comment "Deploy ${IMAGE_TO_DEPLOY}" \
+              --parameters "commands=[\"sed -i 's|^Environment=IMAGE_URI=.*|Environment=IMAGE_URI=${IMAGE_TO_DEPLOY}|' /etc/systemd/system/${APP_NAME}.service\",\"systemctl daemon-reload\",\"systemctl restart ${APP_NAME}.service\"]" >/dev/null
 
             # Espera breve para que el servicio arranque antes del re-registro (útil con 1 instancia)
             sleep 5
