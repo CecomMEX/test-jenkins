@@ -116,7 +116,7 @@ jobs:
                 \
                 # Drop-in para forzar --env-file y usar PORT del unit \
                 sudo mkdir -p /etc/systemd/system/$APP.service.d; \
-                printf \"[Service]\nEnvironmentFile=/etc/$APP/$APP.env\nExecStart=\nExecStart=/usr/bin/docker run --name $APP --pull never --env-file /etc/$APP/$APP.env -p ${PORT}:3000 \\$IMAGE_URI\n\" \
+                printf \"[Service]\nEnvironmentFile=/etc/$APP/$APP.env\nExecStart=\nExecStart=/usr/bin/docker run --name $APP --pull never --env-file /etc/$APP/$APP.env -p 80:3000 \\$IMAGE_URI\n\" \
                   | sudo tee /etc/systemd/system/$APP.service.d/10-envfile.conf >/dev/null; \
                 \
                 # Inserta/actualiza IMAGE_URI y PORT en el unit principal \
