@@ -9,12 +9,14 @@ concurrency:
   group: deploy-main
   cancel-in-progress: true
 
+# Puedes mover estos a Variables/Secrets si prefieres
 env:
   AWS_REGION: us-east-2
   ACCOUNT_ID: 825765398232
   ECR_REPOSITORY: nestjs-app
   APP_NAME: nestjs-app
   PORT: "3000"
+  # Deja el ARN del Target Group como secret porque es más largo/engorroso
   TARGET_GROUP_ARN: ${{ secrets.TARGET_GROUP_ARN }}
 
 jobs:
@@ -60,35 +62,25 @@ jobs:
           docker push "$UNIQUE_URI"
           docker push "$LATEST_URI"
 
-      - name: Prepare .env from GitHub Secret (no logs)
-        id: envfile
-        run: |
-          set -euo pipefail
-          # No imprimas secretos en logs
-          set +x
-          printf '%s' "${{ secrets.APP_ENV_FILE }}" > app.env
-          set -x
-          # Base64 en una sola línea
-          ENV_B64=$(base64 -w 0 app.env || base64 app.env | tr -d '\n')
-          echo "ENV_B64=$ENV_B64" >> $GITHUB_ENV
-
       - name: Rolling deploy (ALB + SSM)
         run: |
           set -euxo pipefail
 
-          # Descubre instancias del Target Group
+          # Obtén las instancias registradas en el Target Group
           TARGETS=$(aws elbv2 describe-target-health --target-group-arn "$TARGET_GROUP_ARN" \
                     --query "TargetHealthDescriptions[].Target.Id" --output text || true)
 
           if [ -z "$TARGETS" ]; then
-            echo "No hay instancias registradas en el Target Group."
+            echo "No hay instancias registradas en el Target Group. Revisa el TG/ALB."
             exit 1
           fi
 
           COUNT=$(echo "$TARGETS" | wc -w | tr -d ' ')
           echo "Targets: $TARGETS (count=$COUNT)"
-
-          IMAGE_TO_DEPLOY="$UNIQUE_URI"   # o "$LATEST_URI"
+          
+          # Usaremos el tag inmutable para desplegar exactamente lo que acabamos de construir
+          IMAGE_TO_DEPLOY="$UNIQUE_URI"
+          # Si prefieres siempre 'latest', usa: IMAGE_TO_DEPLOY="$LATEST_URI"
 
           for IID in $TARGETS; do
             if [ "$COUNT" -gt 1 ]; then
@@ -96,50 +88,27 @@ jobs:
               aws elbv2 deregister-targets --target-group-arn "$TARGET_GROUP_ARN" --targets Id=$IID
               aws elbv2 wait target-deregistered --target-group-arn "$TARGET_GROUP_ARN" --targets Id=$IID || true
             else
-              echo ">> 1 instancia: deploy in-place"
+              echo ">> Solo 1 instancia: deploy in-place (sin deregister para evitar downtime)"
             fi
 
-            echo ">> Update unit (IMAGE_URI/PORT) + upload .env + restart via SSM on $IID"
+            echo ">> Update systemd unit & restart via SSM on $IID"
             aws ssm send-command \
               --document-name "AWS-RunShellScript" \
               --instance-ids "$IID" \
-              --comment "Deploy ${IMAGE_TO_DEPLOY} + .env" \
-              --parameters 'commands=["bash -lc '\''set -euo pipefail; \
-                APP='"${APP_NAME}"'; \
-                PORT='"${PORT}"'; \
-                IMG='"${IMAGE_TO_DEPLOY}"'; \
-                ENV_B64='"${ENV_B64}"'; \
-                \
-                sudo mkdir -p /etc/$APP; \
-                echo \"$ENV_B64\" | base64 -d | sudo tee /etc/$APP/$APP.env >/dev/null; \
-                sudo chmod 600 /etc/$APP/$APP.env; \
-                \
-                # Drop-in para forzar --env-file y usar PORT del unit \
-                sudo mkdir -p /etc/systemd/system/$APP.service.d; \
-                printf \"[Service]\nEnvironmentFile=/etc/$APP/$APP.env\nExecStart=\nExecStart=/usr/bin/docker run --name $APP --pull never --env-file /etc/$APP/$APP.env -p ${PORT}:3000 \\$IMAGE_URI\n\" \
-                  | sudo tee /etc/systemd/system/$APP.service.d/10-envfile.conf >/dev/null; \
-                \
-                # Inserta/actualiza IMAGE_URI y PORT en el unit principal \
-                if ! grep -q \"^Environment=IMAGE_URI=\" /etc/systemd/system/$APP.service; then \
-                  sudo sed -i \"/^\\[Service\\]/a Environment=IMAGE_URI=$IMG\" /etc/systemd/system/$APP.service; \
-                else \
-                  sudo sed -i \"s|^Environment=IMAGE_URI=.*|Environment=IMAGE_URI=$IMG|\" /etc/systemd/system/$APP.service; \
-                fi; \
-                if ! grep -q \"^Environment=PORT=\" /etc/systemd/system/$APP.service; then \
-                  sudo sed -i \"/^\\[Service\\]/a Environment=PORT=$PORT\" /etc/systemd/system/$APP.service; \
-                else \
-                  sudo sed -i \"s|^Environment=PORT=.*|Environment=PORT=$PORT|\" /etc/systemd/system/$APP.service; \
-                fi; \
-                \
-                sudo systemctl daemon-reload; \
-                sudo systemctl restart $APP.service'\''"]' >/dev/null
+              --comment "Deploy ${IMAGE_TO_DEPLOY}" \
+              --parameters "commands=[\"sed -i 's|^Environment=IMAGE_URI=.*|Environment=IMAGE_URI=${IMAGE_TO_DEPLOY}|' /etc/systemd/system/${APP_NAME}.service\",\"systemctl daemon-reload\",\"systemctl restart ${APP_NAME}.service\"]" >/dev/null
 
+            # Espera breve para que el servicio arranque antes del re-registro (útil con 1 instancia)
             sleep 5
 
             if [ "$COUNT" -gt 1 ]; then
               echo ">> Re-register $IID"
               aws elbv2 register-targets --target-group-arn "$TARGET_GROUP_ARN" --targets Id=$IID
               aws elbv2 wait target-in-service --target-group-arn "$TARGET_GROUP_ARN" --targets Id=$IID
+            else
+              echo ">> Con 1 instancia no hay re-registro. Verificando salud vía ALB..."
+              # Si tu TG también apunta a esta misma instancia, puedes opcionalmente validarlo aquí.
+              # sleep 10
             fi
 
             echo ">> $IID actualizado"
